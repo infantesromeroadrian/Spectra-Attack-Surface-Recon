@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+output/
+*.md
+.ruff_cache/
+.mypy_cache/

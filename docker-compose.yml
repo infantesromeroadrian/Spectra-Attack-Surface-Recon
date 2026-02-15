@@ -1,0 +1,144 @@
+# ==============================================================
+# Spectra - Docker Compose
+# ==============================================================
+# Orquesta todos los servicios del proyecto.
+#
+# Servicios permanentes (arrancan con docker compose up):
+#   - neo4j:  Base de datos de grafo
+#   - webapp: Dashboard web + chat con agente IA
+#
+# Servicios on-demand (profile "tools"):
+#   - recon:  Motor de reconocimiento (ejecuta y sale)
+#   - agent:  Chat CLI interactivo (ejecuta y sale)
+#
+# Uso:
+#   docker compose up -d                                # Neo4j + Webapp
+#   docker compose run --rm recon                       # Lanzar scan
+#   docker compose run --rm agent                       # Chat CLI
+#   docker compose down                                 # Parar todo
+# ==============================================================
+
+services:
+
+  # ============================================================
+  # Neo4j - Base de datos de grafo
+  # ============================================================
+  neo4j:
+    image: neo4j:5-community
+    container_name: spectra-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/spectrapass
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    networks:
+      - spectra-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ============================================================
+  # Webapp - Dashboard + AI Chat
+  # ============================================================
+  # http://localhost:8000       UI
+  # http://localhost:8000/docs  Swagger
+  # ============================================================
+  webapp:
+    build:
+      context: .
+      dockerfile: webapp/Dockerfile
+    image: spectra-webapp:latest
+    container_name: spectra-webapp
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./output:/app/output
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=spectrapass
+    networks:
+      - spectra-net
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  # ============================================================
+  # Recon - Motor de reconocimiento (on-demand)
+  # ============================================================
+  # docker compose run --rm recon
+  # ============================================================
+  recon:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: recon/Dockerfile
+    image: spectra-recon:latest
+    container_name: spectra-recon
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      - SCAN_TARGET=${SCAN_TARGET:-scanme.nmap.org}
+      - SCAN_PROFILE=${SCAN_PROFILE:-standard}
+      - USE_NVD=${USE_NVD:-true}
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=spectrapass
+    volumes:
+      - ./output:/app/output
+    networks:
+      - spectra-net
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  # ============================================================
+  # Agent - Chat CLI interactivo (on-demand)
+  # ============================================================
+  # docker compose run --rm agent
+  # ============================================================
+  agent:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    image: spectra-agent:latest
+    container_name: spectra-agent
+    stdin_open: true
+    tty: true
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=spectrapass
+    networks:
+      - spectra-net
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+volumes:
+  neo4j-data:
+  neo4j-logs:
+
+networks:
+  spectra-net:
+    driver: bridge

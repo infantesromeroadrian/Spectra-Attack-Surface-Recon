@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spectra - Attack Surface Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Force-graph: visualizacion interactiva del grafo Neo4j -->
+    <script src="https://unpkg.com/force-graph@1.49.5/dist/force-graph.min.js"></script>
+</head>
+<body>
+
+    <!-- ============================================================ -->
+    <!-- Header + Navigation                                          -->
+    <!-- ============================================================ -->
+    <header>
+        <div class="header-brand">
+            <h1>SPECTRA</h1>
+            <span class="header-subtitle">Attack Surface Intelligence</span>
+        </div>
+        <nav>
+            <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+            <button class="nav-btn" data-tab="graph">Graph</button>
+            <button class="nav-btn" data-tab="scan">Scan</button>
+            <button class="nav-btn" data-tab="chat">AI Analyst</button>
+        </nav>
+        <div class="header-status">
+            <span id="status-dot" class="status-dot"></span>
+            <span id="status-text">Connecting...</span>
+        </div>
+    </header>
+
+    <main>
+
+        <!-- ============================================================ -->
+        <!-- Dashboard View                                               -->
+        <!-- ============================================================ -->
+        <section id="dashboard" class="tab-content active">
+
+            <!-- Stats Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <span class="stat-value" id="stat-domains">-</span>
+                    <span class="stat-label">Domains</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-value" id="stat-hosts">-</span>
+                    <span class="stat-label">Hosts</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-value" id="stat-ports">-</span>
+                    <span class="stat-label">Open Ports</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-value" id="stat-services">-</span>
+                    <span class="stat-label">Services</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-value" id="stat-techs">-</span>
+                    <span class="stat-label">Technologies</span>
+                </div>
+                <div class="stat-card card-vulns">
+                    <span class="stat-value" id="stat-vulns">-</span>
+                    <span class="stat-label">Vulnerabilities</span>
+                </div>
+            </div>
+
+            <!-- Hosts Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>Hosts</h2>
+                </div>
+                <div id="hosts-container" class="panel-body">
+                    <p class="placeholder">Loading hosts...</p>
+                </div>
+            </div>
+
+            <!-- Vulnerabilities Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>Vulnerabilities</h2>
+                    <div class="panel-filters">
+                        <select id="vuln-severity-filter">
+                            <option value="all">All severities</option>
+                            <option value="critical">Critical</option>
+                            <option value="high">High</option>
+                            <option value="medium">Medium</option>
+                            <option value="low">Low</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="table-wrapper">
+                    <table id="vulns-table">
+                        <thead>
+                            <tr>
+                                <th>CVE ID</th>
+                                <th>Severity</th>
+                                <th>CVSS</th>
+                                <th>Service</th>
+                                <th>Port</th>
+                                <th>Host</th>
+                                <th>Description</th>
+                            </tr>
+                        </thead>
+                        <tbody id="vulns-body">
+                            <tr><td colspan="7" class="placeholder">Loading vulnerabilities...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Attack Paths Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>Attack Paths</h2>
+                </div>
+                <div id="paths-container" class="panel-body">
+                    <p class="placeholder">Loading attack paths...</p>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Graph Visualization View                                     -->
+        <!-- ============================================================ -->
+        <section id="graph" class="tab-content">
+            <div class="panel" style="margin-bottom: 0;">
+                <div class="panel-header">
+                    <h2>Attack Surface Graph</h2>
+                    <div class="graph-legend">
+                        <span class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span>Domain</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#00ff88"></span>Host</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#eab308"></span>Port</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#a78bfa"></span>Service</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>Vulnerability</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#f472b6"></span>Technology</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#6b7280"></span>Scan</span>
+                    </div>
+                </div>
+                <div id="graph-container"></div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Scan Launcher View                                           -->
+        <!-- ============================================================ -->
+        <section id="scan" class="tab-content">
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>Launch Reconnaissance Scan</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="scan-form">
+                        <div class="scan-field">
+                            <label for="scan-target">Target (domain or IP)</label>
+                            <input type="text" id="scan-target" placeholder="e.g. scanme.nmap.org" autocomplete="off">
+                        </div>
+                        <div class="scan-field">
+                            <label for="scan-profile">Scan Profile</label>
+                            <select id="scan-profile">
+                                <option value="quick">Quick (top 100 ports, no version detection)</option>
+                                <option value="standard" selected>Standard (top 1000 ports + versions)</option>
+                                <option value="full">Full (all 65535 ports + versions + scripts)</option>
+                            </select>
+                        </div>
+                        <button id="scan-start" class="scan-btn">Start Scan</button>
+                    </div>
+
+                    <!-- Scan status display -->
+                    <div id="scan-status" class="scan-status" style="display: none;">
+                        <div class="scan-status-header">
+                            <span id="scan-status-icon" class="scan-spinner"></span>
+                            <span id="scan-status-text">Starting scan...</span>
+                        </div>
+                        <div id="scan-status-detail" class="scan-status-detail"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Chat View                                                    -->
+        <!-- ============================================================ -->
+        <section id="chat" class="tab-content">
+
+            <div id="chat-messages">
+                <div class="chat-msg system">
+                    <div class="msg-content">
+                        Welcome to Spectra AI Analyst. Ask me anything about the
+                        attack surface: vulnerabilities, open ports, services,
+                        attack paths, or remediation advice.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Preset suggestion buttons -->
+            <div id="chat-presets">
+                <button class="preset-btn" data-msg="Give me an overview of the attack surface">Attack Surface</button>
+                <button class="preset-btn" data-msg="What are the critical vulnerabilities and how can they be exploited?">Critical Vulns</button>
+                <button class="preset-btn" data-msg="Show me all attack paths to critical vulnerabilities">Attack Paths</button>
+                <button class="preset-btn" data-msg="What services are exposed and what versions are they running?">Services</button>
+                <button class="preset-btn" data-msg="What remediation steps do you recommend, prioritized by risk?">Remediation</button>
+                <button class="preset-btn" data-msg="List all open ports grouped by host">Open Ports</button>
+            </div>
+
+            <div id="chat-input-area">
+                <button id="chat-new" title="Start new conversation (clears agent memory)">New Chat</button>
+                <input
+                    type="text"
+                    id="chat-input"
+                    placeholder="Ask about the attack surface..."
+                    autocomplete="off"
+                >
+                <button id="chat-send">Send</button>
+            </div>
+
+        </section>
+
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

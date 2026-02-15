@@ -1,0 +1,731 @@
+/*
+ * Spectra Frontend - Vanilla JS.
+ *
+ * Estructura:
+ *   1. API functions   - fetch() calls al backend FastAPI
+ *   2. Render functions - Construyen HTML a partir de datos JSON
+ *   3. Event handlers   - Clicks, inputs, tabs
+ *   4. Init             - Carga inicial al abrir la pagina
+ *
+ * Sin frameworks, sin build step. Solo DOM APIs nativas.
+ */
+
+// ============================================================
+// 0. Session - Thread ID para memoria multi-turn del agente
+// ============================================================
+
+/**
+ * Genera un thread_id unico por sesion de chat.
+ * Se renueva al hacer click en "New Chat".
+ */
+let chatThreadId = crypto.randomUUID();
+
+
+// ============================================================
+// 1. API Functions
+// ============================================================
+
+const API = {
+    /**
+     * Health check - verifica conectividad con Neo4j.
+     * @returns {{status, neo4j, nodes, relationships, agent}}
+     */
+    async health() {
+        const res = await fetch('/api/health');
+        return res.json();
+    },
+
+    /**
+     * Stats del grafo - conteo de nodos por tipo.
+     * @returns {{Domain, Host, Port, Service, Technology, Vulnerability, ...}}
+     */
+    async stats() {
+        const res = await fetch('/api/graph/stats');
+        return res.json();
+    },
+
+    /**
+     * Lista de hosts con puertos y conteo de vulns.
+     * @returns {Array<{address, hostname, os, ports, vuln_count}>}
+     */
+    async hosts() {
+        const res = await fetch('/api/graph/hosts');
+        return res.json();
+    },
+
+    /**
+     * Vulnerabilidades filtradas.
+     * @param {string} severity - "all", "critical", "high", "medium", "low"
+     * @returns {Array<{vuln_id, severity, score, description, service, version, port, host}>}
+     */
+    async vulns(severity = 'all') {
+        const params = new URLSearchParams();
+        if (severity !== 'all') params.set('severity', severity);
+        const res = await fetch(`/api/graph/vulns?${params}`);
+        return res.json();
+    },
+
+    /**
+     * Cadenas de ataque.
+     * @returns {Array<{domain, host, port, protocol, service, version, cve, severity, score, description}>}
+     */
+    async paths() {
+        const res = await fetch('/api/graph/paths');
+        return res.json();
+    },
+
+    /**
+     * Enviar mensaje al agente IA (multi-turn con thread_id).
+     * @param {string} message
+     * @returns {{response, tool_calls}}
+     */
+    async chat(message) {
+        const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, thread_id: chatThreadId }),
+        });
+        return res.json();
+    },
+
+    /**
+     * Datos del grafo para visualizacion force-directed.
+     * @returns {{nodes: Array, links: Array}}
+     */
+    async graphVisual() {
+        const res = await fetch('/api/graph/visual');
+        return res.json();
+    },
+
+    /**
+     * Lanzar un scan.
+     * @param {string} target
+     * @param {string} profile
+     */
+    async scanStart(target, profile) {
+        const res = await fetch('/api/scan/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target, profile }),
+        });
+        return res.json();
+    },
+
+    /**
+     * Estado del scan en curso.
+     * @returns {{status, target, profile, elapsed, error, summary}}
+     */
+    async scanStatus() {
+        const res = await fetch('/api/scan/status');
+        return res.json();
+    },
+};
+
+
+// ============================================================
+// 2. Render Functions
+// ============================================================
+
+/**
+ * Actualiza las 6 stat cards del dashboard.
+ */
+function renderStats(stats) {
+    document.getElementById('stat-domains').textContent = stats.Domain || 0;
+    document.getElementById('stat-hosts').textContent = stats.Host || 0;
+    document.getElementById('stat-ports').textContent = stats.Port || 0;
+    document.getElementById('stat-services').textContent = stats.Service || 0;
+    document.getElementById('stat-techs').textContent = stats.Technology || 0;
+    document.getElementById('stat-vulns').textContent = stats.Vulnerability || 0;
+}
+
+
+/**
+ * Renderiza la lista de hosts como cards.
+ */
+function renderHosts(hosts) {
+    const container = document.getElementById('hosts-container');
+
+    if (!hosts || hosts.length === 0) {
+        container.innerHTML = '<p class="placeholder">No hosts found in the graph.</p>';
+        return;
+    }
+
+    container.innerHTML = hosts.map(host => {
+        const portsHtml = (host.ports || []).map(p => {
+            const svc = p.service !== 'unknown' ? p.service : '';
+            const ver = p.version || '';
+            const label = svc ? `${svc} ${ver}`.trim() : '';
+            return `
+                <span class="port-tag">
+                    <span class="port-num">${p.number}/${p.protocol || 'tcp'}</span>
+                    ${label ? `<span class="port-svc">${label}</span>` : ''}
+                </span>
+            `;
+        }).join('');
+
+        const vulnBadge = host.vuln_count > 0
+            ? `<span class="badge badge-critical">${host.vuln_count} vulns</span>`
+            : '<span class="badge badge-low">clean</span>';
+
+        return `
+            <div class="host-card">
+                <div class="host-header">
+                    <div>
+                        <span class="host-ip">${host.address}</span>
+                        <span class="host-hostname">${host.hostname || ''}</span>
+                    </div>
+                    ${vulnBadge}
+                </div>
+                <div class="host-ports">${portsHtml || '<span class="placeholder">No open ports</span>'}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+
+/**
+ * Renderiza la tabla de vulnerabilidades.
+ */
+function renderVulns(vulns) {
+    const tbody = document.getElementById('vulns-body');
+
+    if (!vulns || vulns.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="placeholder">No vulnerabilities found.</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = vulns.map(v => {
+        const sev = (v.severity || 'info').toLowerCase();
+        const desc = (v.description || '').substring(0, 120);
+        const svc = [v.service, v.version].filter(Boolean).join(' ');
+
+        return `
+            <tr>
+                <td><code>${v.vuln_id || '-'}</code></td>
+                <td><span class="badge badge-${sev}">${sev}</span></td>
+                <td>${v.score != null ? v.score.toFixed(1) : '-'}</td>
+                <td>${svc || '-'}</td>
+                <td>${v.port || '-'}</td>
+                <td><code>${v.host || '-'}</code></td>
+                <td class="desc-cell" title="${(v.description || '').replace(/"/g, '&quot;')}">${desc}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+
+/**
+ * Renderiza las cadenas de ataque como cards visuales.
+ */
+function renderPaths(paths) {
+    const container = document.getElementById('paths-container');
+
+    if (!paths || paths.length === 0) {
+        container.innerHTML = '<p class="placeholder">No attack paths found.</p>';
+        return;
+    }
+
+    // Agrupar por CVE para evitar duplicados visuales
+    const seen = new Set();
+    const unique = paths.filter(p => {
+        const key = `${p.host}:${p.port}-${p.cve}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+
+    container.innerHTML = unique.map(p => {
+        const sev = (p.severity || 'info').toLowerCase();
+        const svc = [p.service, p.version].filter(Boolean).join(' ') || '?';
+        const desc = (p.description || '').substring(0, 150);
+
+        return `
+            <div class="path-card">
+                <div class="path-chain">
+                    <span class="node-domain">${p.domain}</span>
+                    <span class="arrow">-></span>
+                    <span class="node-host">${p.host}</span>
+                    <span class="arrow">:</span>
+                    <span class="node-port">${p.port}/${p.protocol || 'tcp'}</span>
+                    <span class="arrow">-></span>
+                    <span class="node-service">${svc}</span>
+                    <span class="arrow">-></span>
+                    <span class="node-vuln">${p.cve}</span>
+                    <span class="badge badge-${sev}" style="margin-left: 0.5rem;">
+                        CVSS ${p.score != null ? p.score.toFixed(1) : '?'}
+                    </span>
+                </div>
+                <div class="path-desc">${desc}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+
+/**
+ * Anade un mensaje al chat.
+ * @param {'user'|'assistant'|'system'|'error'} role
+ * @param {string} content
+ * @param {Array} toolCalls - opcional, tool calls del agente
+ */
+function appendChatMessage(role, content, toolCalls = []) {
+    const container = document.getElementById('chat-messages');
+    const div = document.createElement('div');
+    div.className = `chat-msg ${role}`;
+
+    let html = `<div class="msg-content">${escapeHtml(content)}</div>`;
+
+    // Mostrar tool calls como detalle colapsable
+    if (toolCalls && toolCalls.length > 0) {
+        const toolsHtml = toolCalls.map(tc =>
+            `<div class="msg-tool-item">${tc.name}(${JSON.stringify(tc.args)})</div>`
+        ).join('');
+        html += `
+            <div class="msg-tools">
+                <details>
+                    <summary>${toolCalls.length} tool call${toolCalls.length > 1 ? 's' : ''}</summary>
+                    ${toolsHtml}
+                </details>
+            </div>
+        `;
+    }
+
+    div.innerHTML = html;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+    return div;
+}
+
+
+/**
+ * Escape HTML para prevenir XSS en el chat.
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+
+/**
+ * Renderiza el grafo force-directed en el container.
+ */
+let graphInstance = null;
+
+// Colores por tipo de nodo
+const NODE_COLORS = {
+    Domain: '#3b82f6',
+    Subdomain: '#60a5fa',
+    Host: '#00ff88',
+    Port: '#eab308',
+    Service: '#a78bfa',
+    Technology: '#f472b6',
+    Vulnerability: '#ef4444',
+    Scan: '#6b7280',
+};
+
+// Tamano por tipo de nodo
+const NODE_SIZES = {
+    Domain: 8,
+    Host: 7,
+    Vulnerability: 6,
+    Service: 5,
+    Port: 4,
+    Technology: 4,
+    Scan: 3,
+    Subdomain: 4,
+};
+
+function renderGraph(data) {
+    const container = document.getElementById('graph-container');
+    if (!container || !data.nodes || data.nodes.length === 0) return;
+
+    // Destruir grafo previo si existe
+    if (graphInstance) {
+        graphInstance._destructor && graphInstance._destructor();
+    }
+
+    graphInstance = ForceGraph()(container)
+        .graphData({
+            nodes: data.nodes.map(n => ({
+                id: n.id,
+                type: n.type,
+                label: n.label || n.type,
+                extra: n.extra,
+            })),
+            links: data.links.map(l => ({
+                source: l.source,
+                target: l.target,
+                type: l.type,
+            })),
+        })
+        .nodeId('id')
+        .nodeLabel(n => `[${n.type}] ${n.label}`)
+        .nodeColor(n => NODE_COLORS[n.type] || '#6b7280')
+        .nodeVal(n => NODE_SIZES[n.type] || 4)
+        .linkLabel(l => l.type)
+        .linkColor(() => 'rgba(255,255,255,0.12)')
+        .linkDirectionalArrowLength(4)
+        .linkDirectionalArrowRelPos(1)
+        .linkWidth(0.5)
+        .backgroundColor('#0a0e17')
+        .nodeCanvasObject((node, ctx, globalScale) => {
+            // Circulo relleno
+            const size = NODE_SIZES[node.type] || 4;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+            ctx.fillStyle = NODE_COLORS[node.type] || '#6b7280';
+            ctx.fill();
+
+            // Label si el zoom es suficiente
+            if (globalScale > 1.5) {
+                ctx.font = `${Math.max(10 / globalScale, 2)}px sans-serif`;
+                ctx.fillStyle = '#e5e7eb';
+                ctx.textAlign = 'center';
+                ctx.fillText(node.label || '', node.x, node.y + size + 8 / globalScale);
+            }
+        })
+        .nodePointerAreaPaint((node, color, ctx) => {
+            const size = NODE_SIZES[node.type] || 4;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, size + 2, 0, 2 * Math.PI);
+            ctx.fillStyle = color;
+            ctx.fill();
+        })
+        .warmupTicks(50)
+        .cooldownTicks(100);
+}
+
+
+// ============================================================
+// 3. Event Handlers
+// ============================================================
+
+/**
+ * Tab switching: Dashboard <-> Graph <-> Scan <-> Chat
+ */
+function initTabs() {
+    document.querySelectorAll('.nav-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            // Update nav buttons
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            // Update tab content
+            const tabId = btn.dataset.tab;
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+
+            // Si se activa el tab Graph, redimensionar el grafo
+            if (tabId === 'graph' && graphInstance) {
+                const container = document.getElementById('graph-container');
+                graphInstance.width(container.clientWidth);
+                graphInstance.height(container.clientHeight);
+            }
+        });
+    });
+}
+
+
+/**
+ * Vulnerability severity filter.
+ */
+function initVulnFilter() {
+    const select = document.getElementById('vuln-severity-filter');
+    select.addEventListener('change', async () => {
+        const vulns = await API.vulns(select.value);
+        renderVulns(vulns);
+    });
+}
+
+
+/**
+ * Chat: enviar mensaje y mostrar respuesta.
+ * Incluye boton "New Chat" para resetear la conversacion (nuevo thread_id).
+ */
+function initChat() {
+    const input = document.getElementById('chat-input');
+    const sendBtn = document.getElementById('chat-send');
+    const newChatBtn = document.getElementById('chat-new');
+
+    // New Chat: genera nuevo thread_id y limpia el historial visual
+    if (newChatBtn) {
+        newChatBtn.addEventListener('click', () => {
+            chatThreadId = crypto.randomUUID();
+            const container = document.getElementById('chat-messages');
+            container.innerHTML = '';
+            appendChatMessage('system', 'New conversation started. The agent has no memory of previous messages.');
+            input.focus();
+        });
+    }
+
+    async function sendMessage() {
+        const message = input.value.trim();
+        if (!message) return;
+
+        // Mostrar mensaje del usuario
+        appendChatMessage('user', message);
+        input.value = '';
+
+        // Deshabilitar input mientras el agente piensa
+        input.disabled = true;
+        sendBtn.disabled = true;
+
+        // Mostrar indicador de "thinking"
+        const thinkingDiv = appendChatMessage('thinking', 'Analyzing');
+        thinkingDiv.querySelector('.msg-content').classList.add('thinking-dots');
+
+        try {
+            const data = await API.chat(message);
+
+            // Quitar thinking
+            thinkingDiv.remove();
+
+            // Mostrar respuesta del agente
+            appendChatMessage('assistant', data.response, data.tool_calls);
+
+        } catch (err) {
+            thinkingDiv.remove();
+            appendChatMessage('error', `Error: ${err.message}`);
+        }
+
+        // Re-habilitar input
+        input.disabled = false;
+        sendBtn.disabled = false;
+        input.focus();
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+}
+
+
+/**
+ * Preset suggestion buttons: click -> fill input -> send.
+ */
+function initPresets() {
+    document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const input = document.getElementById('chat-input');
+            input.value = btn.dataset.msg;
+            // Activar chat tab si no esta activo
+            const chatTab = document.querySelector('[data-tab="chat"]');
+            if (!chatTab.classList.contains('active')) {
+                chatTab.click();
+            }
+            // Enviar automaticamente
+            document.getElementById('chat-send').click();
+        });
+    });
+}
+
+
+/**
+ * Scan launcher: form submit + polling.
+ */
+function initScan() {
+    const startBtn = document.getElementById('scan-start');
+    const targetInput = document.getElementById('scan-target');
+    const profileSelect = document.getElementById('scan-profile');
+    const statusDiv = document.getElementById('scan-status');
+    const statusText = document.getElementById('scan-status-text');
+    const statusDetail = document.getElementById('scan-status-detail');
+    const statusIcon = document.getElementById('scan-status-icon');
+
+    startBtn.addEventListener('click', async () => {
+        const target = targetInput.value.trim();
+        if (!target) {
+            targetInput.focus();
+            return;
+        }
+
+        // Deshabilitar form
+        startBtn.disabled = true;
+        targetInput.disabled = true;
+        profileSelect.disabled = true;
+        statusDiv.style.display = 'block';
+        statusText.textContent = 'Starting scan...';
+        statusDetail.textContent = '';
+        statusIcon.className = 'scan-spinner';
+
+        try {
+            const res = await API.scanStart(target, profileSelect.value);
+            if (res.error) {
+                statusText.textContent = res.error;
+                statusIcon.className = 'scan-failed-icon';
+                statusIcon.textContent = 'X';
+                startBtn.disabled = false;
+                targetInput.disabled = false;
+                profileSelect.disabled = false;
+                return;
+            }
+
+            // Empezar polling
+            statusText.textContent = `Scanning ${target}...`;
+            pollScanStatus();
+
+        } catch (err) {
+            statusText.textContent = `Error: ${err.message}`;
+            statusIcon.className = 'scan-failed-icon';
+            statusIcon.textContent = 'X';
+            startBtn.disabled = false;
+            targetInput.disabled = false;
+            profileSelect.disabled = false;
+        }
+    });
+}
+
+
+/**
+ * Pollea el estado del scan cada 3 segundos.
+ */
+function pollScanStatus() {
+    const statusText = document.getElementById('scan-status-text');
+    const statusDetail = document.getElementById('scan-status-detail');
+    const statusIcon = document.getElementById('scan-status-icon');
+    const startBtn = document.getElementById('scan-start');
+    const targetInput = document.getElementById('scan-target');
+    const profileSelect = document.getElementById('scan-profile');
+
+    const interval = setInterval(async () => {
+        try {
+            const s = await API.scanStatus();
+
+            if (s.status === 'running') {
+                statusText.textContent = `Scanning ${s.target}...`;
+                statusDetail.textContent = s.elapsed ? `Elapsed: ${s.elapsed}` : '';
+
+            } else if (s.status === 'completed') {
+                clearInterval(interval);
+                statusIcon.className = 'scan-complete-icon';
+                statusIcon.textContent = '\u2713';
+                statusText.textContent = 'Scan completed!';
+
+                const sum = s.summary || {};
+                statusDetail.textContent =
+                    `${sum.hosts || 0} hosts | ${sum.open_ports || 0} ports | ` +
+                    `${sum.vulnerabilities || 0} vulns | ${sum.duration || '?'}`;
+
+                // Re-habilitar form
+                startBtn.disabled = false;
+                targetInput.disabled = false;
+                profileSelect.disabled = false;
+
+                // Recargar dashboard con nuevos datos
+                reloadDashboard();
+
+            } else if (s.status === 'failed') {
+                clearInterval(interval);
+                statusIcon.className = 'scan-failed-icon';
+                statusIcon.textContent = 'X';
+                statusText.textContent = 'Scan failed';
+                statusDetail.textContent = s.error || 'Unknown error';
+
+                startBtn.disabled = false;
+                targetInput.disabled = false;
+                profileSelect.disabled = false;
+            }
+        } catch (err) {
+            // Network error, keep polling
+        }
+    }, 3000);
+}
+
+
+/**
+ * Recarga los datos del dashboard y el grafo despues de un scan.
+ */
+async function reloadDashboard() {
+    try {
+        const [stats, hosts, vulns, paths, graphData] = await Promise.all([
+            API.stats(),
+            API.hosts(),
+            API.vulns(),
+            API.paths(),
+            API.graphVisual(),
+        ]);
+
+        renderStats(stats);
+        renderHosts(hosts);
+        renderVulns(vulns);
+        renderPaths(paths);
+        renderGraph(graphData);
+
+        // Actualizar status bar
+        const statusDot = document.getElementById('status-dot');
+        const headerStatus = document.getElementById('status-text');
+        const total = Object.entries(stats)
+            .filter(([k]) => k !== 'relationships')
+            .reduce((sum, [, v]) => sum + (v || 0), 0);
+        statusDot.className = 'status-dot connected';
+        headerStatus.textContent = `${total} nodes | ${stats.relationships || 0} rels`;
+
+    } catch (err) {
+        console.error('Error reloading dashboard:', err);
+    }
+}
+
+
+// ============================================================
+// 4. Init - Carga inicial
+// ============================================================
+
+async function init() {
+    // Inicializar event handlers
+    initTabs();
+    initVulnFilter();
+    initChat();
+    initPresets();
+    initScan();
+
+    // Health check
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+
+    try {
+        const health = await API.health();
+
+        if (health.status === 'ok') {
+            statusDot.className = 'status-dot connected';
+            statusText.textContent = `${health.nodes} nodes | ${health.relationships} rels`;
+        } else {
+            statusDot.className = 'status-dot error';
+            statusText.textContent = 'Neo4j error';
+            return;
+        }
+    } catch (err) {
+        statusDot.className = 'status-dot error';
+        statusText.textContent = 'Backend offline';
+        return;
+    }
+
+    // Cargar datos del dashboard y grafo en paralelo
+    try {
+        const [stats, hosts, vulns, paths, graphData] = await Promise.all([
+            API.stats(),
+            API.hosts(),
+            API.vulns(),
+            API.paths(),
+            API.graphVisual(),
+        ]);
+
+        renderStats(stats);
+        renderHosts(hosts);
+        renderVulns(vulns);
+        renderPaths(paths);
+        renderGraph(graphData);
+
+    } catch (err) {
+        console.error('Error loading dashboard data:', err);
+    }
+}
+
+
+// Arrancar cuando el DOM este listo
+document.addEventListener('DOMContentLoaded', init);

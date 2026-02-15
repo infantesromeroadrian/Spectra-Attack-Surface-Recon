@@ -1,0 +1,17 @@
+[project]
+name = "spectra"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "dnspython>=2.8.0",
+    "fastapi>=0.115.0",
+    "httpx>=0.28.1",
+    "langchain-groq>=1.1.2",
+    "langgraph>=1.0.8",
+    "neo4j>=6.1.0",
+    "pydantic>=2.12.5",
+    "python-nmap>=0.7.1",
+    "uvicorn[standard]>=0.34.0",
+]

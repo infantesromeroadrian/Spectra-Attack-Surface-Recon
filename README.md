@@ -1,12 +1,24 @@
-# SPECTRA
+<p align="center">
+  <img src="assets/spectra-banner.png" alt="Spectra" width="600">
+</p>
 
-AI-powered attack surface reconnaissance tool. Scans targets for subdomains, open ports, services, and known vulnerabilities, stores everything in a Neo4j graph database, and provides an AI analyst that reasons over the graph to answer security questions.
+<h1 align="center">SPECTRA</h1>
 
-Built as a learning project to understand how red team recon tools work end-to-end.
+<p align="center">
+  AI-powered attack surface reconnaissance tool. Scans targets for subdomains, open ports, services, and known vulnerabilities, stores everything in a Neo4j graph database, and provides an AI analyst that reasons over the graph to answer security questions.
+</p>
 
-![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue)
-![Docker](https://img.shields.io/badge/docker-compose-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+<p align="center">
+  Built as a learning project to understand how red team recon tools work end-to-end.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/docker-compose-blue" alt="Docker">
+  <img src="https://img.shields.io/badge/LangGraph-ReAct_Agent-orange" alt="LangGraph">
+  <img src="https://img.shields.io/badge/Neo4j-Graph_DB-blue" alt="Neo4j">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+</p>
 
 ---
 

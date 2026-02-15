@@ -17,3 +17,6 @@ wheels/
 # Output data
 output/
 .comments/
+
+# Original large assets (optimized versions tracked instead)
+assets/Gemini_Generated_Image_*

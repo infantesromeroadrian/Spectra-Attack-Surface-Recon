@@ -1,27 +1,26 @@
 """
 Spectra Recon - Vulnerability Assessment.
 
-Cruza los servicios detectados (con sus versiones) contra
-bases de datos de vulnerabilidades conocidas (CVEs).
+Cruza los servicios detectados (con sus versiones) contra la
+base de datos oficial de vulnerabilidades del NIST (NVD API v2).
 
-Dos fuentes de datos:
+Todas las vulnerabilidades reportadas son organicas: provienen
+de consultas reales a la NVD API usando los CPE strings que
+nmap detecta en cada servicio. No hay datos hardcodeados.
 
-1. Base local (KNOWN_VULNS) - Diccionario hardcoded con CVEs
-   de alta criticidad para servicios comunes. Rapida, offline,
-   pero limitada a lo que incluyamos manualmente.
-
-2. NVD API v2 (NIST) - La base de datos oficial de CVEs del
-   gobierno de EEUU. Busca por CPE string (el identificador
-   estandar de software que nmap nos da).
-   API: https://services.nvd.nist.gov/rest/json/cves/2.0
-   Sin API key: 5 requests / 30 segundos (suficiente para nosotros).
+API: https://services.nvd.nist.gov/rest/json/cves/2.0
+Sin API key: 5 requests / 30 segundos.
+Con API key: 50 requests / 30 segundos.
 
 El flujo:
   1. Recibe los hosts con sus puertos y servicios
-  2. Para cada servicio, extrae el CPE y/o producto+version
-  3. Busca en la base local (instantaneo)
-  4. Busca en NVD por CPE (si disponible)
+  2. Para cada servicio, extrae el CPE que nmap detecto
+  3. Convierte el CPE de formato 2.2 a 2.3 (requerido por NVD)
+  4. Consulta la NVD API en tiempo real
   5. Deduplica y devuelve lista de Vulnerability
+
+Si un servicio no tiene CPE (nmap no lo detecto), no se reportan
+vulnerabilidades para ese servicio. Prefiere no reportar a inventar.
 
 Uso basico:
     assessor = VulnAssessment()
@@ -43,168 +42,17 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Base local de vulnerabilidades conocidas
-# ---------------------------------------------------------------------------
-# Formato: (producto_lower, version_prefix) -> lista de CVEs
-#
-# Esto es un subset minimo para aprender. En produccion se usaria
-# una base de datos completa (NVD dump, Vulners, etc.)
-#
-# Cada entrada es un dict con los campos de nuestro modelo Vulnerability.
-# La clave es (producto, version_prefix): si el servicio detectado
-# tiene ese producto y su version empieza por ese prefix, hay match.
-
-KNOWN_VULNS: dict[tuple[str, str], list[dict]] = {
-    # Apache HTTP Server
-    ("apache", "2.4.7"): [
-        {
-            "vuln_id": "CVE-2021-44790",
-            "severity": Severity.CRITICAL,
-            "score": 9.8,
-            "description": "Apache HTTP Server 2.4.x buffer overflow in mod_lua. "
-            "Allows RCE via crafted request body.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-44790"],
-        },
-        {
-            "vuln_id": "CVE-2021-41773",
-            "severity": Severity.CRITICAL,
-            "score": 9.8,
-            "description": "Apache HTTP Server 2.4.49 path traversal. "
-            "Allows reading files outside document root.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-41773"],
-        },
-        {
-            "vuln_id": "CVE-2017-15715",
-            "severity": Severity.HIGH,
-            "score": 8.1,
-            "description": "Apache HTTP Server 2.4.0-2.4.29 bypass of FilesMatch "
-            "via malicious filename with trailing newline.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2017-15715"],
-        },
-    ],
-    ("apache", "2.4.6"): [
-        {
-            "vuln_id": "CVE-2021-44790",
-            "severity": Severity.CRITICAL,
-            "score": 9.8,
-            "description": "Apache HTTP Server 2.4.x buffer overflow in mod_lua. "
-            "Allows RCE via crafted request body.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-44790"],
-        },
-        {
-            "vuln_id": "CVE-2014-0226",
-            "severity": Severity.HIGH,
-            "score": 7.5,
-            "description": "Apache HTTP Server race condition in mod_status. "
-            "Heap buffer overflow allows DoS or information disclosure.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2014-0226"],
-        },
-    ],
-    # OpenSSH
-    ("openssh", "6.6"): [
-        {
-            "vuln_id": "CVE-2016-0777",
-            "severity": Severity.HIGH,
-            "score": 8.1,
-            "description": "OpenSSH client before 7.1p2 roaming feature "
-            "information leak. Allows private key theft.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2016-0777"],
-        },
-        {
-            "vuln_id": "CVE-2015-5600",
-            "severity": Severity.HIGH,
-            "score": 8.5,
-            "description": "OpenSSH before 6.9 MaxAuthTries bypass. "
-            "Allows brute force keyboard-interactive authentication.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2015-5600"],
-        },
-        {
-            "vuln_id": "CVE-2023-38408",
-            "severity": Severity.CRITICAL,
-            "score": 9.8,
-            "description": "OpenSSH before 9.3p2 ssh-agent remote code execution "
-            "via PKCS#11 provider.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2023-38408"],
-        },
-    ],
-    ("openssh", "7."): [
-        {
-            "vuln_id": "CVE-2023-38408",
-            "severity": Severity.CRITICAL,
-            "score": 9.8,
-            "description": "OpenSSH before 9.3p2 ssh-agent remote code execution "
-            "via PKCS#11 provider.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2023-38408"],
-        },
-        {
-            "vuln_id": "CVE-2020-15778",
-            "severity": Severity.HIGH,
-            "score": 7.8,
-            "description": "OpenSSH through 8.3p1 scp command injection "
-            "allows executing arbitrary commands.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2020-15778"],
-        },
-    ],
-    ("openssh", "8."): [
-        {
-            "vuln_id": "CVE-2023-38408",
-            "severity": Severity.CRITICAL,
-            "score": 9.8,
-            "description": "OpenSSH before 9.3p2 ssh-agent remote code execution "
-            "via PKCS#11 provider.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2023-38408"],
-        },
-    ],
-    # nginx
-    ("nginx", "1.18"): [
-        {
-            "vuln_id": "CVE-2021-23017",
-            "severity": Severity.CRITICAL,
-            "score": 9.4,
-            "description": "nginx resolver off-by-one heap write. "
-            "Allows RCE via forged DNS response.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-23017"],
-        },
-    ],
-    ("nginx", "1.14"): [
-        {
-            "vuln_id": "CVE-2019-9511",
-            "severity": Severity.HIGH,
-            "score": 7.5,
-            "description": "nginx HTTP/2 Data Dribble DoS. "
-            "Attacker exhausts server resources via slow reads.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2019-9511"],
-        },
-        {
-            "vuln_id": "CVE-2021-23017",
-            "severity": Severity.CRITICAL,
-            "score": 9.4,
-            "description": "nginx resolver off-by-one heap write. "
-            "Allows RCE via forged DNS response.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-23017"],
-        },
-    ],
-    # Microsoft IIS
-    ("iis", "10."): [
-        {
-            "vuln_id": "CVE-2021-31166",
-            "severity": Severity.CRITICAL,
-            "score": 9.8,
-            "description": "HTTP Protocol Stack RCE in Windows IIS. "
-            "Wormable, allows unauthenticated remote code execution.",
-            "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-31166"],
-        },
-    ],
-}
-
-
-# ---------------------------------------------------------------------------
 # Vulnerability Assessment
 # ---------------------------------------------------------------------------
 
 
 class VulnAssessment:
-    """Evaluacion de vulnerabilidades cruzando servicios con bases de CVEs.
+    """Evaluacion de vulnerabilidades consultando la NVD API del NIST.
+
+    Todas las vulnerabilidades reportadas provienen de la NVD (National
+    Vulnerability Database) del gobierno de EEUU. El matching se hace
+    por CPE string — el identificador estandar de software que nmap
+    detecta durante el service scan (-sV).
 
     Ejemplo:
         assessor = VulnAssessment()
@@ -212,7 +60,7 @@ class VulnAssessment:
         # Desde hosts escaneados con port_scanner
         vulns = assessor.assess(hosts)
 
-        # Solo NVD para un CPE especifico
+        # Consultar NVD para un CPE especifico
         vulns = assessor.query_nvd("cpe:/a:apache:http_server:2.4.7")
     """
 
@@ -240,10 +88,12 @@ class VulnAssessment:
         self._nvd_delay = 0.6 if nvd_api_key else 6.0
 
     def assess(self, hosts: list[Host]) -> list[Vulnerability]:
-        """Evalua vulnerabilidades de todos los hosts.
+        """Evalua vulnerabilidades de todos los hosts via NVD API.
 
         Recorre cada host -> cada puerto abierto -> cada servicio,
-        y busca CVEs conocidos.
+        y consulta la NVD si el servicio tiene un CPE detectado por nmap.
+
+        Servicios sin CPE se omiten — no se inventan vulnerabilidades.
 
         Args:
             hosts: Lista de hosts con puertos y servicios detectados.
@@ -252,6 +102,10 @@ class VulnAssessment:
             Lista de vulnerabilidades encontradas (deduplicadas).
         """
         logger.info(f"Evaluacion de vulnerabilidades para {len(hosts)} host(s)")
+
+        if not self._use_nvd:
+            logger.info("NVD deshabilitado, no se reportan vulnerabilidades")
+            return []
 
         all_vulns: dict[str, Vulnerability] = {}  # Dedup por vuln_id
 
@@ -266,29 +120,19 @@ class VulnAssessment:
                     f"({svc.product or svc.name} {svc.version or ''})"
                 )
 
-                # 1. Busqueda local (instantanea)
-                local_vulns = self._search_local(svc.product, svc.version)
-                for v in local_vulns:
+                # Solo consultar NVD si nmap detecto un CPE para este servicio
+                if not svc.cpe:
+                    logger.debug(f"  {service_label}: sin CPE, omitiendo consulta NVD")
+                    continue
+
+                nvd_vulns = self.query_nvd(svc.cpe)
+                for v in nvd_vulns:
                     v.affected_service = service_label
-                    all_vulns[v.vuln_id] = v
+                    if v.vuln_id not in all_vulns:
+                        all_vulns[v.vuln_id] = v
 
-                if local_vulns:
-                    logger.info(
-                        f"  {service_label}: {len(local_vulns)} CVE(s) en base local"
-                    )
-
-                # 2. Busqueda NVD por CPE (si tenemos CPE y NVD habilitado)
-                if self._use_nvd and svc.cpe:
-                    nvd_vulns = self.query_nvd(svc.cpe)
-                    for v in nvd_vulns:
-                        v.affected_service = service_label
-                        if v.vuln_id not in all_vulns:
-                            all_vulns[v.vuln_id] = v
-
-                    if nvd_vulns:
-                        logger.info(
-                            f"  {service_label}: {len(nvd_vulns)} CVE(s) en NVD"
-                        )
+                if nvd_vulns:
+                    logger.info(f"  {service_label}: {len(nvd_vulns)} CVE(s) en NVD")
 
         results = sorted(
             all_vulns.values(),
@@ -297,48 +141,6 @@ class VulnAssessment:
         )
         logger.info(f"Total vulnerabilidades unicas: {len(results)}")
         return results
-
-    # -------------------------------------------------------------------
-    # Busqueda local
-    # -------------------------------------------------------------------
-
-    def _search_local(
-        self,
-        product: str | None,
-        version: str | None,
-    ) -> list[Vulnerability]:
-        """Busca en la base local de vulnerabilidades conocidas.
-
-        Compara el producto+version del servicio contra las claves
-        de KNOWN_VULNS. El match es por prefijo de version:
-        si la clave es ("apache", "2.4.7") y el servicio tiene
-        version "2.4.7", hay match.
-
-        Args:
-            product: Nombre del producto (ej: "OpenSSH", "Apache httpd")
-            version: Version del producto (ej: "2.4.7", "6.6.1p1")
-
-        Returns:
-            Lista de Vulnerability que coinciden.
-        """
-        if not product:
-            return []
-
-        # Normalizar producto: "Apache httpd" -> "apache", "OpenSSH" -> "openssh"
-        product_lower = product.lower().split()[0]
-
-        vulns: list[Vulnerability] = []
-
-        for (known_product, version_prefix), cve_list in KNOWN_VULNS.items():
-            if product_lower != known_product:
-                continue
-
-            # Si no tenemos version, reportamos todo (mejor pecar de mas)
-            if not version or version.startswith(version_prefix):
-                for cve_data in cve_list:
-                    vulns.append(Vulnerability(**cve_data))
-
-        return vulns
 
     # -------------------------------------------------------------------
     # NVD API v2
@@ -365,6 +167,14 @@ class VulnAssessment:
         """
         cpe_23 = self._cpe_to_23(cpe)
         if not cpe_23:
+            return []
+
+        # Descartar CPEs sin version concreta — la NVD no los acepta en cpeName.
+        # Formato CPE 2.3: cpe:2.3:part:vendor:product:version:...
+        # El campo version es el indice 5. Si es "*" no hay version especifica.
+        cpe_parts = cpe_23.split(":")
+        if len(cpe_parts) > 5 and cpe_parts[5] == "*":
+            logger.debug(f"CPE sin version concreta, omitiendo: {cpe_23}")
             return []
 
         # Rate limiting
@@ -466,7 +276,6 @@ class VulnAssessment:
             if metric_list:
                 cvss_data = metric_list[0].get("cvssData", {})
                 score = cvss_data.get("baseScore")
-                severity_str = cvss_data.get("baseSeverity", "").lower()
 
                 if score is not None:
                     severity = self._map_severity(float(score))

@@ -881,3 +881,175 @@ td.desc-cell {
         grid-template-columns: repeat(2, 1fr);
     }
 }
+
+
+/* ============================================================
+   Auto-Analysis Panel (post-scan AI brief)
+   ============================================================ */
+
+.scan-analysis {
+    display: none;
+    margin-top: 1rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--accent-dim);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    animation: fadeIn 0.4s ease;
+}
+
+.scan-analysis .analysis-header {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid rgba(0, 255, 136, 0.15);
+}
+
+.scan-analysis .analysis-content {
+    font-size: 0.85rem;
+    line-height: 1.65;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+
+/* ============================================================
+   Structured Assessment Panel (in chat messages)
+   ============================================================ */
+
+.assessment-panel {
+    margin-top: 0.75rem;
+    background: var(--bg-secondary);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 1rem;
+    font-size: 0.82rem;
+}
+
+.assessment-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.assessment-badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 0.8rem;
+    color: #fff;
+    letter-spacing: 0.04em;
+}
+
+.assessment-confidence {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+}
+
+.assessment-counts {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.assessment-section {
+    margin-top: 0.75rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.assessment-section-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.5rem;
+}
+
+.assessment-risk {
+    padding: 0.4rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.assessment-risk:last-child {
+    border-bottom: none;
+}
+
+.risk-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    color: var(--text-primary);
+}
+
+.risk-title code {
+    font-size: 0.75rem;
+    color: var(--accent);
+    background: rgba(0, 255, 136, 0.08);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+}
+
+.risk-cvss {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--sev-high);
+}
+
+.risk-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.2rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.risk-priority {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    text-transform: uppercase;
+}
+
+.risk-immediate {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--sev-critical);
+}
+
+.risk-shortterm {
+    background: rgba(234, 179, 8, 0.15);
+    color: var(--sev-medium);
+}
+
+.risk-longterm {
+    background: rgba(0, 255, 136, 0.1);
+    color: var(--accent);
+}
+
+.assessment-actions {
+    margin: 0;
+    padding-left: 1.2rem;
+    color: var(--text-primary);
+    line-height: 1.6;
+}
+
+.assessment-actions li {
+    margin-bottom: 0.25rem;
+}

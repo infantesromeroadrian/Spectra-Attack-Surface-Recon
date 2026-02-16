@@ -75,7 +75,7 @@ const API = {
     },
 
     /**
-     * Enviar mensaje al agente IA (multi-turn con thread_id).
+     * Enviar mensaje al agente IA (legacy non-streaming).
      * @param {string} message
      * @returns {{response, tool_calls}}
      */
@@ -86,6 +86,20 @@ const API = {
             body: JSON.stringify({ message, thread_id: chatThreadId }),
         });
         return res.json();
+    },
+
+    /**
+     * Enviar mensaje al agente IA con streaming SSE.
+     * Devuelve un ReadableStream que emite eventos SSE.
+     * @param {string} message
+     * @returns {Response} raw fetch response for streaming
+     */
+    async chatStream(message) {
+        return fetch('/api/chat/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, thread_id: chatThreadId }),
+        });
     },
 
     /**
@@ -308,6 +322,108 @@ function escapeHtml(text) {
 
 
 /**
+ * Extrae y parsea el bloque JSON estructurado de la respuesta del agente.
+ * Devuelve {text, assessment} donde text es la respuesta sin el JSON
+ * y assessment es el objeto parseado (o null si no hay).
+ */
+function parseStructuredResponse(fullText) {
+    // Look for ```json ... ``` block at the end of the response
+    const jsonBlockRegex = /```json\s*\n([\s\S]*?)\n```\s*$/;
+    const match = fullText.match(jsonBlockRegex);
+
+    if (!match) {
+        return { text: fullText, assessment: null };
+    }
+
+    const text = fullText.slice(0, match.index).trim();
+    let assessment = null;
+
+    try {
+        assessment = JSON.parse(match[1]);
+    } catch {
+        // Invalid JSON — keep it as part of the text
+        return { text: fullText, assessment: null };
+    }
+
+    return { text, assessment };
+}
+
+
+/**
+ * Renderiza un assessment estructurado como HTML visual.
+ */
+function renderAssessment(assessment) {
+    if (!assessment) return '';
+
+    const levelColors = {
+        'CRITICAL': 'var(--sev-critical)',
+        'HIGH': 'var(--sev-high)',
+        'MEDIUM': 'var(--sev-medium)',
+        'LOW': 'var(--sev-low)',
+        'MINIMAL': 'var(--accent)',
+    };
+
+    const levelColor = levelColors[assessment.risk_level] || 'var(--text-secondary)';
+
+    let html = `<div class="assessment-panel">`;
+
+    // Risk level badge
+    html += `<div class="assessment-header">
+        <span class="assessment-badge" style="background:${levelColor}">
+            ${assessment.risk_level || '?'} RISK
+        </span>
+        <span class="assessment-confidence">Confidence: ${assessment.confidence || '?'}</span>
+    </div>`;
+
+    // Findings count
+    if (assessment.findings_count) {
+        const fc = assessment.findings_count;
+        html += `<div class="assessment-counts">`;
+        if (fc.critical) html += `<span class="badge badge-critical">${fc.critical} critical</span>`;
+        if (fc.high) html += `<span class="badge badge-high">${fc.high} high</span>`;
+        if (fc.medium) html += `<span class="badge badge-medium">${fc.medium} medium</span>`;
+        if (fc.low) html += `<span class="badge badge-low">${fc.low} low</span>`;
+        html += `</div>`;
+    }
+
+    // Top risks
+    if (assessment.top_risks && assessment.top_risks.length > 0) {
+        html += `<div class="assessment-section">
+            <div class="assessment-section-title">Top Risks</div>`;
+        for (const risk of assessment.top_risks) {
+            const priorityClass = (risk.priority || '').toLowerCase().replace('-', '');
+            html += `<div class="assessment-risk">
+                <div class="risk-title">
+                    ${escapeHtml(risk.title || '?')}
+                    ${risk.cve ? `<code>${escapeHtml(risk.cve)}</code>` : ''}
+                    ${risk.cvss ? `<span class="risk-cvss">CVSS ${risk.cvss}</span>` : ''}
+                </div>
+                <div class="risk-meta">
+                    ${risk.affected ? escapeHtml(risk.affected) : ''}
+                    <span class="risk-priority risk-${priorityClass}">${risk.priority || '?'}</span>
+                </div>
+            </div>`;
+        }
+        html += `</div>`;
+    }
+
+    // Recommended actions
+    if (assessment.recommended_actions && assessment.recommended_actions.length > 0) {
+        html += `<div class="assessment-section">
+            <div class="assessment-section-title">Recommended Actions</div>
+            <ol class="assessment-actions">`;
+        for (const action of assessment.recommended_actions) {
+            html += `<li>${escapeHtml(action)}</li>`;
+        }
+        html += `</ol></div>`;
+    }
+
+    html += `</div>`;
+    return html;
+}
+
+
+/**
  * Renderiza el grafo force-directed en el container.
  */
 let graphInstance = null;
@@ -397,6 +513,59 @@ function renderGraph(data) {
 }
 
 
+/**
+ * Renderiza el auto-analysis brief del agente IA despues de un scan.
+ * Lo muestra tanto en el panel de scan como en el chat.
+ */
+function renderAutoAnalysis(analysis) {
+    // Show in scan panel
+    let container = document.getElementById('scan-analysis');
+    if (!container) {
+        // Create the analysis container dynamically below scan-status
+        const statusDiv = document.getElementById('scan-status');
+        container = document.createElement('div');
+        container.id = 'scan-analysis';
+        container.className = 'scan-analysis';
+        statusDiv.parentNode.insertBefore(container, statusDiv.nextSibling);
+    }
+
+    container.innerHTML = `
+        <div class="analysis-header">AI Security Brief</div>
+        <div class="analysis-content">${escapeHtml(analysis)}</div>
+    `;
+    container.style.display = 'block';
+
+    // Also inject into chat as a system message so the user sees it there too
+    appendChatMessage('assistant', '[Auto-Analysis]\n' + analysis);
+}
+
+
+/**
+ * Pollea el auto-analysis si el agente aun no ha terminado
+ * cuando el scan ya se completo.
+ */
+function pollAutoAnalysis() {
+    let attempts = 0;
+    const maxAttempts = 30; // 30 * 3s = 90s max wait
+
+    const interval = setInterval(async () => {
+        attempts++;
+        try {
+            const s = await API.scanStatus();
+            if (s.analysis) {
+                clearInterval(interval);
+                renderAutoAnalysis(s.analysis);
+            } else if (attempts >= maxAttempts) {
+                clearInterval(interval);
+                // Timeout — no brief generated
+            }
+        } catch (err) {
+            // Network error, keep trying
+        }
+    }, 3000);
+}
+
+
 // ============================================================
 // 3. Event Handlers
 // ============================================================
@@ -471,22 +640,132 @@ function initChat() {
         input.disabled = true;
         sendBtn.disabled = true;
 
-        // Mostrar indicador de "thinking"
-        const thinkingDiv = appendChatMessage('thinking', 'Analyzing');
-        thinkingDiv.querySelector('.msg-content').classList.add('thinking-dots');
+        // Crear mensaje del assistant vacio para streaming
+        const assistantDiv = appendChatMessage('assistant', '');
+        const contentEl = assistantDiv.querySelector('.msg-content');
+        contentEl.classList.add('thinking-dots');
+        contentEl.textContent = 'Analyzing';
+
+        let fullText = '';
+        const toolCalls = [];
 
         try {
-            const data = await API.chat(message);
+            const response = await API.chatStream(message);
 
-            // Quitar thinking
-            thinkingDiv.remove();
+            if (!response.ok) {
+                const err = await response.json();
+                contentEl.classList.remove('thinking-dots');
+                contentEl.textContent = err.error || 'Error connecting to agent.';
+                input.disabled = false;
+                sendBtn.disabled = false;
+                input.focus();
+                return;
+            }
 
-            // Mostrar respuesta del agente
-            appendChatMessage('assistant', data.response, data.tool_calls);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            // Clear thinking state on first token
+            let firstToken = true;
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+
+                // Parse SSE events from buffer
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const jsonStr = line.slice(6).trim();
+                    if (!jsonStr) continue;
+
+                    let event;
+                    try {
+                        event = JSON.parse(jsonStr);
+                    } catch {
+                        continue;
+                    }
+
+                    if (event.type === 'token') {
+                        if (firstToken) {
+                            contentEl.classList.remove('thinking-dots');
+                            contentEl.textContent = '';
+                            firstToken = false;
+                        }
+                        fullText += event.content;
+                        contentEl.textContent = fullText;
+                        // Auto-scroll
+                        const container = document.getElementById('chat-messages');
+                        container.scrollTop = container.scrollHeight;
+
+                    } else if (event.type === 'tool_call') {
+                        toolCalls.push({ name: event.name, args: event.args });
+                        // Show tool activity indicator
+                        if (firstToken) {
+                            contentEl.classList.remove('thinking-dots');
+                            contentEl.textContent = '';
+                            firstToken = false;
+                        }
+                        contentEl.textContent = fullText || `Using tool: ${event.name}...`;
+
+                    } else if (event.type === 'tool_result') {
+                        // Agent got tool result, will continue reasoning
+                        contentEl.textContent = fullText || `Processing ${event.name} results...`;
+
+                    } else if (event.type === 'error') {
+                        fullText = event.message;
+                        contentEl.textContent = fullText;
+
+                    } else if (event.type === 'done') {
+                        // Streaming complete
+                        if (firstToken) {
+                            contentEl.classList.remove('thinking-dots');
+                        }
+                        if (!fullText) {
+                            contentEl.textContent = 'No response generated.';
+                        }
+                    }
+                }
+            }
+
+            // Parse structured assessment from the response
+            const { text: cleanText, assessment } = parseStructuredResponse(fullText);
+            if (assessment) {
+                // Replace content with clean text (without JSON block)
+                contentEl.textContent = cleanText;
+                // Render assessment panel
+                const assessmentHtml = renderAssessment(assessment);
+                if (assessmentHtml) {
+                    const assessDiv = document.createElement('div');
+                    assessDiv.innerHTML = assessmentHtml;
+                    assistantDiv.appendChild(assessDiv);
+                }
+            }
+
+            // Add tool calls details if any
+            if (toolCalls.length > 0) {
+                const toolsHtml = toolCalls.map(tc =>
+                    `<div class="msg-tool-item">${tc.name}(${typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args)})</div>`
+                ).join('');
+                const toolsDiv = document.createElement('div');
+                toolsDiv.className = 'msg-tools';
+                toolsDiv.innerHTML = `
+                    <details>
+                        <summary>${toolCalls.length} tool call${toolCalls.length > 1 ? 's' : ''}</summary>
+                        ${toolsHtml}
+                    </details>
+                `;
+                assistantDiv.appendChild(toolsDiv);
+            }
 
         } catch (err) {
-            thinkingDiv.remove();
-            appendChatMessage('error', `Error: ${err.message}`);
+            contentEl.classList.remove('thinking-dots');
+            contentEl.textContent = `Error: ${err.message}`;
         }
 
         // Re-habilitar input
@@ -619,6 +898,14 @@ function pollScanStatus() {
 
                 // Recargar dashboard con nuevos datos
                 reloadDashboard();
+
+                // Auto-analysis: show AI brief or poll for it
+                if (s.analysis) {
+                    renderAutoAnalysis(s.analysis);
+                } else {
+                    // Agent is still generating — poll for analysis
+                    pollAutoAnalysis();
+                }
 
             } else if (s.status === 'failed') {
                 clearInterval(interval);

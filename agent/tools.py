@@ -18,7 +18,9 @@ Tools disponibles:
   2. find_vulns          - Buscar vulnerabilidades filtradas
   3. find_attack_paths   - Caminos Domain -> Vulnerability
   4. get_host_details    - Info detallada de un host
-  5. run_cypher          - Query Cypher libre (escape hatch)
+  5. calculate_risk_score - Risk score ponderado (0-100)
+  6. compare_scans       - Comparar diferencias entre scans
+  7. run_cypher          - Query Cypher libre (escape hatch)
 """
 
 from __future__ import annotations
@@ -89,9 +91,13 @@ def get_attack_surface() -> str:
     if not records:
         return "No data in the graph. Run a recon scan first."
 
-    lines: list[str] = []
-    for r in records:
-        lines.append(f"Domain: {r['domain']}")
+    lines: list[str] = [f"Total domains scanned: {len(records)}", ""]
+    for i, r in enumerate(records):
+        if i > 0:
+            lines.append("")
+        lines.append(f"{'=' * 40}")
+        lines.append(f"DOMAIN: {r['domain']}")
+        lines.append(f"{'=' * 40}")
         lines.append(f"Hosts: {r['hosts']}")
 
         # Ports
@@ -144,10 +150,17 @@ def find_vulns(
         severity: Filter by severity level. Options: "critical", "high",
                   "medium", "low", or "all" for no filter. Default: "all".
         min_score: Minimum CVSS score (0.0 to 10.0). Default: 0.0.
+                   Must be a number, not a string.
 
     Returns details of matching vulnerabilities including CVE ID, severity,
     CVSS score, description, and the affected service.
     """
+    # Defensive: LLMs sometimes pass strings instead of numbers
+    try:
+        min_score = float(min_score)
+    except (ValueError, TypeError):
+        min_score = 0.0
+
     where_clauses = ["v.score >= $min_score"]
     if severity != "all":
         where_clauses.append("v.severity = $severity")
@@ -159,9 +172,10 @@ def find_vulns(
         MATCH (s:Service)-[:HAS_VULN]->(v:Vulnerability)
         WHERE {where}
         OPTIONAL MATCH (v)-[:AFFECTS]->(h:Host)
+        OPTIONAL MATCH (d:Domain)-[:RESOLVES_TO]->(h)
         RETURN v.vuln_id AS cve, v.severity AS severity, v.score AS score,
                v.description AS description, s.product AS product,
-               s.version AS version, h.address AS host
+               s.version AS version, h.address AS host, d.name AS domain
         ORDER BY v.score DESC
         """,
         {"severity": severity, "min_score": min_score},
@@ -174,9 +188,11 @@ def find_vulns(
     for r in records:
         svc = f"{r.get('product') or '?'} {r.get('version') or ''}"
         host = r.get("host") or "unknown"
+        domain = r.get("domain") or ""
+        domain_str = f" ({domain})" if domain else ""
         lines.append(
             f"\n{r['cve']} [{r['severity']}] CVSS:{r['score']}"
-            f"\n  Service: {svc} on {host}"
+            f"\n  Service: {svc} on {host}{domain_str}"
             f"\n  {r['description'][:200]}"
         )
 
@@ -236,18 +252,20 @@ def find_attack_paths(
 
 @tool
 def get_host_details(address: str) -> str:
-    """Get detailed information about a specific host (IP address).
+    """Get detailed information about a specific host.
 
     Returns all open ports, services running on them, technologies detected,
     and vulnerabilities affecting this host.
 
     Args:
-        address: IP address of the host (e.g., "45.33.32.156").
+        address: IP address OR domain/hostname of the host.
+                 Examples: "45.33.32.156", "scanme.nmap.org", "testphp.vulnweb.com"
     """
-    # Basic info + ports + services
+    # Try by IP first, then by hostname, then by domain name
     records = _run_query(
         """
-        MATCH (h:Host {address: $address})
+        MATCH (h:Host)
+        WHERE h.address = $address OR h.hostname = $address
         OPTIONAL MATCH (h)-[:HAS_PORT]->(p:Port)-[:RUNS]->(s:Service)
         OPTIONAL MATCH (s)-[:HAS_VULN]->(v:Vulnerability)
         RETURN h.address AS address, h.hostname AS hostname, h.os AS os,
@@ -259,8 +277,26 @@ def get_host_details(address: str) -> str:
         {"address": address},
     )
 
+    # Fallback: try resolving domain -> host via graph relationship
     if not records:
-        return f"Host {address} not found in the graph."
+        records = _run_query(
+            """
+            MATCH (d:Domain {name: $address})-[:RESOLVES_TO]->(h:Host)
+            OPTIONAL MATCH (h)-[:HAS_PORT]->(p:Port)-[:RUNS]->(s:Service)
+            OPTIONAL MATCH (s)-[:HAS_VULN]->(v:Vulnerability)
+            RETURN h.address AS address, h.hostname AS hostname, h.os AS os,
+                   p.number AS port, p.state AS state, p.protocol AS proto,
+                   s.name AS svc_name, s.product AS product, s.version AS version,
+                   collect(DISTINCT {id: v.vuln_id, severity: v.severity, score: v.score}) AS vulns
+            ORDER BY p.number
+            """,
+            {"address": address},
+        )
+
+    if not records:
+        return (
+            f"Host '{address}' not found in the graph (tried IP, hostname, and domain)."
+        )
 
     first = records[0]
     lines = [
@@ -355,6 +391,327 @@ def run_cypher(query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool 6: Risk Score
+# ---------------------------------------------------------------------------
+
+
+@tool
+def calculate_risk_score(domain: str = "") -> str:
+    """Calculate a weighted risk score for a domain or the entire attack surface.
+
+    The score is computed from REAL graph data only — nothing is invented.
+
+    Scoring methodology:
+      - Each vulnerability contributes its CVSS score weighted by severity:
+          critical (x4), high (x3), medium (x2), low (x1)
+      - Exposure factor: number of internet-facing open ports
+      - Service diversity penalty: more distinct services = larger attack surface
+      - Final score normalized to 0-100 scale
+
+    The result includes:
+      - Overall risk score (0-100)
+      - Risk level (CRITICAL / HIGH / MEDIUM / LOW / MINIMAL)
+      - Breakdown by category (vulnerability risk, exposure, service diversity)
+      - Top contributing CVEs
+
+    Args:
+        domain: Domain name to score (e.g., "scanme.nmap.org").
+                If empty, scores the entire graph.
+    """
+    # --- Gather vulnerability data ---
+    vuln_query = """
+        MATCH (s:Service)-[:HAS_VULN]->(v:Vulnerability)
+        OPTIONAL MATCH (s)<-[:RUNS]-(p:Port)<-[:HAS_PORT]-(h:Host)
+        OPTIONAL MATCH (d:Domain)-[:RESOLVES_TO]->(h)
+        WHERE CASE WHEN $domain <> '' THEN d.name = $domain ELSE true END
+        RETURN v.vuln_id AS cve, v.severity AS severity, v.score AS score,
+               s.product AS product, s.version AS version,
+               p.number AS port, h.address AS host
+    """
+    vulns = _run_query(vuln_query, {"domain": domain})
+
+    # --- Gather exposure data ---
+    port_query = """
+        MATCH (h:Host)-[:HAS_PORT]->(p:Port)
+        WHERE p.state = 'open'
+        OPTIONAL MATCH (d:Domain)-[:RESOLVES_TO]->(h)
+        WHERE CASE WHEN $domain <> '' THEN d.name = $domain ELSE true END
+        RETURN DISTINCT p.number AS port, p.protocol AS proto
+    """
+    open_ports = _run_query(port_query, {"domain": domain})
+
+    # --- Gather service diversity ---
+    svc_query = """
+        MATCH (p:Port)-[:RUNS]->(s:Service)
+        OPTIONAL MATCH (h:Host)-[:HAS_PORT]->(p)
+        OPTIONAL MATCH (d:Domain)-[:RESOLVES_TO]->(h)
+        WHERE CASE WHEN $domain <> '' THEN d.name = $domain ELSE true END
+        RETURN DISTINCT s.product AS product, s.version AS version
+    """
+    services = _run_query(svc_query, {"domain": domain})
+
+    if not vulns and not open_ports:
+        scope = f"domain '{domain}'" if domain else "the entire graph"
+        return f"No data found for {scope}. Run a recon scan first."
+
+    # --- Calculate vulnerability risk (0-60 points max) ---
+    severity_weights = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    vuln_score = 0.0
+    top_cves: list[dict] = []
+    for v in vulns:
+        weight = severity_weights.get(v.get("severity", "low"), 1)
+        contribution = (v.get("score") or 0.0) * weight
+        vuln_score += contribution
+        top_cves.append(
+            {
+                "cve": v.get("cve", "?"),
+                "score": v.get("score", 0),
+                "severity": v.get("severity", "?"),
+                "contribution": round(contribution, 1),
+            }
+        )
+
+    # Normalize: assume 200 weighted points = max 60 risk points
+    vuln_risk = min(60.0, (vuln_score / 200.0) * 60.0) if vuln_score > 0 else 0.0
+
+    # --- Calculate exposure risk (0-25 points max) ---
+    high_risk_ports = {
+        21,
+        22,
+        23,
+        25,
+        53,
+        80,
+        110,
+        135,
+        139,
+        143,
+        443,
+        445,
+        993,
+        995,
+        1433,
+        1521,
+        3306,
+        3389,
+        5432,
+        5900,
+        8080,
+        8443,
+    }
+    exposed_high = sum(1 for p in open_ports if p.get("port") in high_risk_ports)
+    exposed_other = len(open_ports) - exposed_high
+    exposure_risk = min(25.0, (exposed_high * 3.0 + exposed_other * 1.0))
+
+    # --- Calculate service diversity penalty (0-15 points max) ---
+    unique_services = len(services)
+    diversity_risk = min(15.0, unique_services * 2.5)
+
+    # --- Final score ---
+    total_score = round(vuln_risk + exposure_risk + diversity_risk, 1)
+
+    if total_score >= 80:
+        level = "CRITICAL"
+    elif total_score >= 60:
+        level = "HIGH"
+    elif total_score >= 40:
+        level = "MEDIUM"
+    elif total_score >= 20:
+        level = "LOW"
+    else:
+        level = "MINIMAL"
+
+    # --- Format output ---
+    scope_label = f"Domain: {domain}" if domain else "Entire attack surface"
+    top_cves.sort(key=lambda x: x["contribution"], reverse=True)
+
+    lines = [
+        f"{'=' * 50}",
+        f"RISK SCORE: {total_score}/100 — {level}",
+        f"{'=' * 50}",
+        f"Scope: {scope_label}",
+        "",
+        "Breakdown:",
+        f"  Vulnerability risk:  {round(vuln_risk, 1)}/60  ({len(vulns)} CVEs found)",
+        f"  Exposure risk:       {round(exposure_risk, 1)}/25  ({len(open_ports)} open ports, {exposed_high} high-risk)",
+        f"  Service diversity:   {round(diversity_risk, 1)}/15  ({unique_services} distinct services)",
+        "",
+    ]
+
+    if top_cves:
+        lines.append(f"Top contributing CVEs:")
+        for c in top_cves[:5]:
+            lines.append(
+                f"  {c['cve']} [{c['severity']}] CVSS:{c['score']} (weight: {c['contribution']})"
+            )
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 7: Scan Comparison
+# ---------------------------------------------------------------------------
+
+
+@tool
+def compare_scans(domain: str, scan_id_old: str = "", scan_id_new: str = "") -> str:
+    """Compare two scans of the same domain to detect changes over time.
+
+    Detects:
+      - [NEW] ports, services, or CVEs that appeared
+      - [REMOVED] ports, services, or CVEs that disappeared
+      - [CHANGED] services that changed version
+
+    If scan IDs are not provided, automatically picks the two most recent
+    scans for the given domain.
+
+    Args:
+        domain: Domain name to compare scans for (e.g., "scanme.nmap.org").
+        scan_id_old: (Optional) scan_id of the older scan.
+        scan_id_new: (Optional) scan_id of the newer scan.
+
+    Use this tool when the user asks about changes, differences, evolution,
+    or what's new since the last scan.
+    """
+    # --- Find scan IDs if not provided ---
+    if not scan_id_old or not scan_id_new:
+        scans = _run_query(
+            """
+            MATCH (s:Scan)-[:SCANNED]->(d:Domain {name: $domain})
+            RETURN s.scan_id AS scan_id, s.started_at AS started
+            ORDER BY s.started_at DESC
+            LIMIT 2
+            """,
+            {"domain": domain},
+        )
+        if len(scans) < 2:
+            count = len(scans)
+            return (
+                f"Need at least 2 scans to compare. Found {count} for '{domain}'. "
+                f"Run another scan first."
+            )
+        scan_id_new = scans[0]["scan_id"]
+        scan_id_old = scans[1]["scan_id"]
+
+    # --- Helper: get scan snapshot ---
+    def _get_snapshot(scan_id: str) -> dict:
+        rows = _run_query(
+            """
+            MATCH (sc:Scan {scan_id: $scan_id})-[:SCANNED]->(d:Domain)
+            OPTIONAL MATCH (d)-[:RESOLVES_TO]->(h:Host)-[:HAS_PORT]->(p:Port)
+            OPTIONAL MATCH (p)-[:RUNS]->(s:Service)
+            OPTIONAL MATCH (s)-[:HAS_VULN]->(v:Vulnerability)
+            RETURN d.name AS domain, h.address AS host,
+                   p.number AS port, p.protocol AS proto, p.state AS state,
+                   s.product AS product, s.version AS version, s.name AS svc_name,
+                   v.vuln_id AS cve, v.severity AS severity, v.score AS score,
+                   sc.started_at AS started
+            """,
+            {"scan_id": scan_id},
+        )
+        ports = set()
+        services = {}
+        cves = set()
+        started = None
+        for r in rows:
+            if r.get("port"):
+                port_key = f"{r['port']}/{r.get('proto', 'tcp')}"
+                ports.add(port_key)
+                svc_ver = f"{r.get('product') or r.get('svc_name') or '?'}|{r.get('version') or ''}"
+                services[port_key] = svc_ver
+            if r.get("cve"):
+                cves.add(r["cve"])
+            if r.get("started"):
+                started = r["started"]
+        return {"ports": ports, "services": services, "cves": cves, "started": started}
+
+    old = _get_snapshot(scan_id_old)
+    new = _get_snapshot(scan_id_new)
+
+    if not old["ports"] and not new["ports"]:
+        return f"Both scans have no port data for '{domain}'."
+
+    # --- Compute diffs ---
+    new_ports = new["ports"] - old["ports"]
+    removed_ports = old["ports"] - new["ports"]
+    common_ports = new["ports"] & old["ports"]
+
+    new_cves = new["cves"] - old["cves"]
+    removed_cves = old["cves"] - new["cves"]
+
+    changed_services = []
+    for port in common_ports:
+        old_svc = old["services"].get(port, "?")
+        new_svc = new["services"].get(port, "?")
+        if old_svc != new_svc:
+            changed_services.append((port, old_svc, new_svc))
+
+    # --- Format output ---
+    lines = [
+        f"{'=' * 55}",
+        f"SCAN COMPARISON: {domain}",
+        f"{'=' * 55}",
+        f"Old scan: {scan_id_old} ({old.get('started') or '?'})",
+        f"New scan: {scan_id_new} ({new.get('started') or '?'})",
+        f"",
+    ]
+
+    has_changes = (
+        new_ports or removed_ports or new_cves or removed_cves or changed_services
+    )
+
+    if not has_changes:
+        lines.append("No changes detected between the two scans.")
+        return "\n".join(lines)
+
+    if new_ports:
+        lines.append(f"[NEW] Ports ({len(new_ports)}):")
+        for p in sorted(new_ports):
+            svc = new["services"].get(p, "?")
+            lines.append(f"  + {p} -> {svc.replace('|', ' ')}")
+        lines.append("")
+
+    if removed_ports:
+        lines.append(f"[REMOVED] Ports ({len(removed_ports)}):")
+        for p in sorted(removed_ports):
+            svc = old["services"].get(p, "?")
+            lines.append(f"  - {p} -> {svc.replace('|', ' ')}")
+        lines.append("")
+
+    if changed_services:
+        lines.append(f"[CHANGED] Services ({len(changed_services)}):")
+        for port, old_svc, new_svc in changed_services:
+            lines.append(
+                f"  ~ {port}: {old_svc.replace('|', ' ')} -> {new_svc.replace('|', ' ')}"
+            )
+        lines.append("")
+
+    if new_cves:
+        lines.append(f"[NEW] CVEs ({len(new_cves)}):")
+        for cve in sorted(new_cves):
+            lines.append(f"  + {cve}")
+        lines.append("")
+
+    if removed_cves:
+        lines.append(f"[REMOVED] CVEs ({len(removed_cves)}):")
+        for cve in sorted(removed_cves):
+            lines.append(f"  - {cve}")
+
+    # Summary
+    lines.append("")
+    total_changes = (
+        len(new_ports)
+        + len(removed_ports)
+        + len(new_cves)
+        + len(removed_cves)
+        + len(changed_services)
+    )
+    lines.append(f"Total changes: {total_changes}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Factory: crear los tools con el driver Neo4j inyectado
 # ---------------------------------------------------------------------------
 
@@ -380,5 +737,7 @@ def create_tools(driver: Driver) -> list:
         find_vulns,
         find_attack_paths,
         get_host_details,
+        calculate_risk_score,
+        compare_scans,
         run_cypher,
     ]

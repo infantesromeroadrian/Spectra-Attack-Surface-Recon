@@ -404,9 +404,16 @@ def _parse_affected_service(affected: str) -> tuple[str | None, str | None]:
 def _parse_host_ip(affected: str) -> str | None:
     """Extrae la IP del string affected_service.
 
-    Formato: "45.33.32.156:22 (OpenSSH ...)"
-    Devuelve: "45.33.32.156"
+    Formato: "<direccion>:<puerto> (<servicio>)"
+      "45.33.32.156:22 (OpenSSH ...)"   -> "45.33.32.156"
+      "2001:db8::10:443 (nginx 1.18.0)" -> "2001:db8::10"
+
+    El puerto es lo que va tras el ULTIMO ":" antes del parentesis. Partir
+    por el primer ":" rompia las IPv6, que llevan ":" dentro de la direccion,
+    y la vulnerabilidad quedaba sin enlazar a su host en el grafo.
     """
-    if ":" not in affected:
+    address_port = affected.split(" (", 1)[0].strip()
+    address, sep, port = address_port.rpartition(":")
+    if not sep or not address or not port.isdigit():
         return None
-    return affected.split(":")[0]
+    return address

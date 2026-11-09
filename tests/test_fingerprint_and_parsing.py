@@ -69,6 +69,16 @@ def test_affected_service_is_split_into_product_and_version(
     assert _parse_affected_service(affected) == expected
 
 
-def test_host_ip_is_taken_from_an_ipv4_affected_service() -> None:
-    assert _parse_host_ip("192.0.2.10:22 (OpenSSH 8.9p1)") == "192.0.2.10"
-    assert _parse_host_ip("no-port") is None
+@pytest.mark.parametrize(
+    ("affected", "expected"),
+    [
+        ("192.0.2.10:22 (OpenSSH 8.9p1)", "192.0.2.10"),
+        ("2001:db8::10:443 (nginx 1.18.0)", "2001:db8::10"),
+        ("2001:db8::10:443", "2001:db8::10"),
+        ("no-port", None),
+        ("192.0.2.10:ssh (OpenSSH)", None),
+        (":22 (OpenSSH)", None),
+    ],
+)
+def test_host_ip_is_taken_before_the_last_colon(affected: str, expected: str | None) -> None:
+    assert _parse_host_ip(affected) == expected

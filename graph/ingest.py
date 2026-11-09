@@ -45,11 +45,7 @@ import logging
 from neo4j import Driver, ManagedTransaction
 
 from recon.models import (
-    Host,
     ScanResult,
-    Subdomain,
-    Vulnerability,
-    WebTechnology,
 )
 
 logger = logging.getLogger(__name__)

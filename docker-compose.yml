@@ -28,10 +28,11 @@ services:
     container_name: spectra-neo4j
     restart: unless-stopped
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      # Solo en localhost: la base de datos no se expone a la red.
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     environment:
-      NEO4J_AUTH: neo4j/spectrapass
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-spectrapass}
       NEO4J_server_memory_heap_initial__size: 256m
       NEO4J_server_memory_heap_max__size: 512m
       NEO4J_server_memory_pagecache_size: 256m
@@ -63,8 +64,11 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
+    # Solo en localhost: la API lanza escaneos y no tiene autenticacion.
+    # Publicarla en 0.0.0.0 permitiria a cualquiera en la red usar este
+    # equipo para escanear objetivos arbitrarios.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./output:/app/output
     environment:
@@ -72,7 +76,7 @@ services:
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=spectrapass
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-spectrapass}
     networks:
       - spectra-net
     depends_on:
@@ -100,7 +104,7 @@ services:
       - USE_NVD=${USE_NVD:-true}
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=spectrapass
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-spectrapass}
     volumes:
       - ./output:/app/output
     networks:
@@ -128,7 +132,7 @@ services:
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=spectrapass
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-spectrapass}
     networks:
       - spectra-net
     depends_on:

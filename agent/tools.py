@@ -25,11 +25,11 @@ Tools disponibles:
 
 from __future__ import annotations
 
-import json
 import logging
+import re
 
 from langchain_core.tools import tool
-from neo4j import Driver
+from neo4j import Driver, ManagedTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +49,44 @@ def _get_driver() -> Driver:
     return _driver
 
 
+def _collect(tx: ManagedTransaction, cypher: str, params: dict) -> list[dict]:
+    """Ejecuta la query dentro de la transaccion y materializa los registros."""
+    return [dict(record) for record in tx.run(cypher, params)]
+
+
 def _run_query(cypher: str, params: dict | None = None) -> list[dict]:
-    """Ejecuta una query Cypher y devuelve los resultados como lista de dicts."""
+    """Ejecuta una query Cypher en una transaccion de LECTURA.
+
+    Los tools del agente solo leen el grafo. Una transaccion de lectura
+    hace que Neo4j rechace cualquier escritura con un error en tiempo de
+    ejecucion. No es un control de acceso completo (ver run_cypher).
+    """
     driver = _get_driver()
     with driver.session() as session:
-        result = session.run(cypher, params or {})
-        return [dict(record) for record in result]
+        return session.execute_read(_collect, cypher, params or {})
+
+
+# Clausulas que modifican el grafo o salen de el (APOC, LOAD CSV, admin).
+# CALL se bloquea entero: los procedimientos APOC de lectura pueden hacer
+# peticiones HTTP o leer ficheros (apoc.load.*), y eso no es "solo lectura".
+_FORBIDDEN_CYPHER = re.compile(
+    r"\b(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|DROP|FOREACH|CALL|LOAD|"
+    r"GRANT|REVOKE|DENY|ALTER|START|STOP|TERMINATE|USE|EXPLAIN|PROFILE)\b",
+    re.IGNORECASE,
+)
+
+
+def _query_type(cypher: str) -> str | None:
+    """Pide a Neo4j el tipo de una query sin ejecutarla (EXPLAIN).
+
+    Devuelve "r" (lectura), "rw", "w" o "s" (schema), segun el planner
+    del propio servidor. Es la segunda barrera de run_cypher: no depende
+    de adivinar palabras clave, sino de como Neo4j entiende la query.
+    """
+    driver = _get_driver()
+    with driver.session() as session:
+        summary = session.run("EXPLAIN " + cypher).consume()
+    return summary.query_type
 
 
 # ---------------------------------------------------------------------------
@@ -362,11 +394,26 @@ def run_cypher(query: str) -> str:
       MATCH (s:Service) WHERE s.product = 'Apache' RETURN s.product, s.version
       MATCH (v:Vulnerability) RETURN v.vuln_id, v.score ORDER BY v.score DESC
     """
-    # Safety: block write operations
-    query_upper = query.upper().strip()
-    for forbidden in ["CREATE", "DELETE", "SET ", "MERGE", "REMOVE", "DROP"]:
-        if forbidden in query_upper:
-            return f"Error: Write operations are not allowed. Query contained '{forbidden}'."
+    # La query la escribe el LLM, y el LLM lee datos del objetivo escaneado
+    # (banners, registros TXT, HTML). Esos datos pueden llevar instrucciones
+    # inyectadas, asi que esta query se trata como entrada no fiable.
+    # Tres barreras:
+    #   1. Lista de clausulas prohibidas, por palabra completa.
+    #   2. EXPLAIN: Neo4j clasifica la query sin ejecutarla; solo pasa "r".
+    #   3. Ejecucion en transaccion de lectura (_run_query).
+    match = _FORBIDDEN_CYPHER.search(query)
+    if match:
+        return (
+            "Error: only read-only MATCH/RETURN queries are allowed. "
+            f"Query contained '{match.group(1).upper()}'."
+        )
+
+    try:
+        query_type = _query_type(query)
+    except Exception as e:
+        return f"Cypher error: {e}"
+    if query_type != "r":
+        return f"Error: only read-only queries are allowed (query type: {query_type})."
 
     try:
         records = _run_query(query)
@@ -539,7 +586,7 @@ def calculate_risk_score(domain: str = "") -> str:
     ]
 
     if top_cves:
-        lines.append(f"Top contributing CVEs:")
+        lines.append("Top contributing CVEs:")
         for c in top_cves[:5]:
             lines.append(
                 f"  {c['cve']} [{c['severity']}] CVSS:{c['score']} (weight: {c['contribution']})"
@@ -653,7 +700,7 @@ def compare_scans(domain: str, scan_id_old: str = "", scan_id_new: str = "") -> 
         f"{'=' * 55}",
         f"Old scan: {scan_id_old} ({old.get('started') or '?'})",
         f"New scan: {scan_id_new} ({new.get('started') or '?'})",
-        f"",
+        "",
     ]
 
     has_changes = (
